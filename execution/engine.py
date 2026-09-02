@@ -2,7 +2,8 @@ import time
 from typing import Dict, Any, Optional, Tuple, List
 from config import settings
 from mt5 import mt5_client, TickData
-from database import db_manager, TradeRepository, OrderRepository, TradeStatus, OrderStatus, OrderType
+from database.repository import TradeRepository, OrderRepository
+from database.models import TradeStatus, OrderStatus, OrderType
 from core import get_logger
 
 logger = get_logger("trading")
@@ -49,7 +50,7 @@ class ExecutionEngine:
                     ticket = int(time.time() * 1000) % 10000000
                     logger.info(f"[SIMULATED EXECUTION] {order_type} {volume} {symbol} @ {curr_price:.5f} (SL: {stop_loss}, TP: {take_profit}) -> Ticket: {ticket}")
 
-                    from database import db_manager as current_db
+                    from database.connection import db_manager as current_db
                     with current_db.get_session() as session:
                         trade_repo = TradeRepository(session)
                         trade_repo.create(
@@ -99,7 +100,7 @@ class ExecutionEngine:
                         ticket = result.order or result.deal
                         logger.info(f"[NATIVE MT5 EXECUTION] {order_type} {volume} {symbol} @ {curr_price:.5f} -> Ticket: {ticket}")
 
-                        from database import db_manager as current_db
+                        from database.connection import db_manager as current_db
                         with current_db.get_session() as session:
                             trade_repo = TradeRepository(session)
                             trade_repo.create(
@@ -129,7 +130,7 @@ class ExecutionEngine:
 
     def modify_order(self, ticket: int, stop_loss: Optional[float], take_profit: Optional[float]) -> Tuple[bool, str]:
         """Modifies Stop Loss and Take Profit of an existing order."""
-        from database import db_manager as current_db
+        from database.connection import db_manager as current_db
         with current_db.get_session() as session:
             trade_repo = TradeRepository(session)
             trade = trade_repo.get_by_ticket(ticket)
@@ -155,22 +156,32 @@ class ExecutionEngine:
 
     def close_trade(self, ticket: int, exit_reason: str = "MANUAL_CLOSE") -> Tuple[bool, str]:
         """Closes position completely."""
-        from database import db_manager as current_db
+        from database.connection import db_manager as current_db
+
+        symbol = ""
+        close_price = 0.0
+        profit = 0.0
+
         with current_db.get_session() as session:
             trade_repo = TradeRepository(session)
             trade = trade_repo.get_by_ticket(ticket)
             if not trade or trade.status != TradeStatus.OPEN.value:
                 return False, f"Trade {ticket} is not open."
 
-            tick = mt5_client.get_tick(trade.symbol)
-            close_price = tick.bid if trade.order_type == "BUY" else tick.ask if tick else trade.open_price
+            symbol = str(trade.symbol)
+            order_type = str(trade.order_type)
+            open_price = float(trade.open_price)
+            volume = float(trade.volume)
 
-            pnl_mult = 1 if trade.order_type == "BUY" else -1
-            profit = (close_price - trade.open_price) * pnl_mult * trade.volume * 100000.0
+            tick = mt5_client.get_tick(symbol)
+            close_price = tick.bid if order_type == "BUY" else (tick.ask if tick else open_price)
+
+            pnl_mult = 1 if order_type == "BUY" else -1
+            profit = (close_price - open_price) * pnl_mult * volume * 100000.0
 
             trade_repo.close_trade(ticket, close_price=close_price, profit=profit, exit_reason=exit_reason)
 
-        logger.info(f"Closed trade {ticket} ({trade.symbol}) @ {close_price:.5f}. Profit: ${profit:.2f}. Reason: {exit_reason}")
+        logger.info(f"Closed trade {ticket} ({symbol}) @ {close_price:.5f}. Profit: ${profit:.2f}. Reason: {exit_reason}")
         return True, f"Closed trade {ticket} successfully"
 
 

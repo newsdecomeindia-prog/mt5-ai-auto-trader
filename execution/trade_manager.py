@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
-from database import db_manager, TradeRepository, TradeStatus
+from database.repository import TradeRepository
+from database.models import TradeStatus
 from execution.engine import execution_engine
 from mt5 import mt5_client
 from core import get_logger
@@ -28,54 +29,73 @@ class TradeManager:
         Scans all open trades in DB and applies trade management rules.
         """
         results = []
-        with db_manager.get_session() as session:
+        from database.connection import db_manager as current_db
+
+        trades_to_process = []
+        with current_db.get_session() as session:
             trade_repo = TradeRepository(session)
             open_trades = trade_repo.get_open_trades()
-
             for trade in open_trades:
-                tick = mt5_client.get_tick(trade.symbol)
-                if not tick:
-                    continue
+                trades_to_process.append({
+                    "ticket": trade.ticket,
+                    "symbol": trade.symbol,
+                    "order_type": trade.order_type,
+                    "open_price": trade.open_price,
+                    "stop_loss": trade.stop_loss,
+                    "take_profit": trade.take_profit
+                })
 
-                curr_price = tick.bid if trade.order_type == "BUY" else tick.ask
-                pips = (curr_price - trade.open_price) * 10000.0 if trade.order_type == "BUY" else (trade.open_price - curr_price) * 10000.0
+        for trade in trades_to_process:
+            ticket = trade["ticket"]
+            symbol = trade["symbol"]
+            order_type = trade["order_type"]
+            open_price = trade["open_price"]
+            stop_loss = trade["stop_loss"]
+            take_profit = trade["take_profit"]
 
-                action_taken = None
+            tick = mt5_client.get_tick(symbol)
+            if not tick:
+                continue
 
-                # 1. Break Even Check
-                if pips >= self.break_even_pips and (trade.stop_loss is None or (trade.order_type == "BUY" and trade.stop_loss < trade.open_price) or (trade.order_type == "SELL" and trade.stop_loss > trade.open_price)):
-                    new_sl = trade.open_price + 0.0001 if trade.order_type == "BUY" else trade.open_price - 0.0001
-                    execution_engine.modify_order(trade.ticket, stop_loss=new_sl, take_profit=trade.take_profit)
-                    action_taken = "BREAK_EVEN_MOVED"
-                    logger.info(f"Trade {trade.ticket} moved to Break-Even at {new_sl:.5f}")
+            curr_price = tick.bid if order_type == "BUY" else tick.ask
+            pips = (curr_price - open_price) * 10000.0 if order_type == "BUY" else (open_price - curr_price) * 10000.0
 
-                # 2. Trailing Stop Check
-                if pips >= self.trailing_stop_pips:
-                    dist = (self.trailing_stop_pips / 10000.0)
-                    new_sl = curr_price - dist if trade.order_type == "BUY" else curr_price + dist
-                    if trade.order_type == "BUY" and (trade.stop_loss is None or new_sl > trade.stop_loss):
-                        execution_engine.modify_order(trade.ticket, stop_loss=new_sl, take_profit=trade.take_profit)
-                        action_taken = "TRAILING_STOP_UPDATED"
-                    elif trade.order_type == "SELL" and (trade.stop_loss is None or new_sl < trade.stop_loss):
-                        execution_engine.modify_order(trade.ticket, stop_loss=new_sl, take_profit=trade.take_profit)
-                        action_taken = "TRAILING_STOP_UPDATED"
+            action_taken = None
 
-                # 3. Hit Stop Loss or Take Profit check
-                if trade.stop_loss and ((trade.order_type == "BUY" and curr_price <= trade.stop_loss) or (trade.order_type == "SELL" and curr_price >= trade.stop_loss)):
-                    execution_engine.close_trade(trade.ticket, exit_reason="STOP_LOSS_HIT")
-                    action_taken = "STOP_LOSS_HIT"
+            # 1. Break Even Check
+            if pips >= self.break_even_pips and (stop_loss is None or (order_type == "BUY" and stop_loss < open_price) or (order_type == "SELL" and stop_loss > open_price)):
+                new_sl = open_price + 0.0001 if order_type == "BUY" else open_price - 0.0001
+                execution_engine.modify_order(ticket, stop_loss=new_sl, take_profit=take_profit)
+                action_taken = "BREAK_EVEN_MOVED"
+                logger.info(f"Trade {ticket} moved to Break-Even at {new_sl:.5f}")
 
-                elif trade.take_profit and ((trade.order_type == "BUY" and curr_price >= trade.take_profit) or (trade.order_type == "SELL" and curr_price <= trade.take_profit)):
-                    execution_engine.close_trade(trade.ticket, exit_reason="TAKE_PROFIT_HIT")
-                    action_taken = "TAKE_PROFIT_HIT"
+            # 2. Trailing Stop Check
+            if pips >= self.trailing_stop_pips:
+                dist = (self.trailing_stop_pips / 10000.0)
+                new_sl = curr_price - dist if order_type == "BUY" else curr_price + dist
+                if order_type == "BUY" and (stop_loss is None or new_sl > stop_loss):
+                    execution_engine.modify_order(ticket, stop_loss=new_sl, take_profit=take_profit)
+                    action_taken = "TRAILING_STOP_UPDATED"
+                elif order_type == "SELL" and (stop_loss is None or new_sl < stop_loss):
+                    execution_engine.modify_order(ticket, stop_loss=new_sl, take_profit=take_profit)
+                    action_taken = "TRAILING_STOP_UPDATED"
 
-                if action_taken:
-                    results.append({
-                        "ticket": trade.ticket,
-                        "symbol": trade.symbol,
-                        "action": action_taken,
-                        "current_price": curr_price
-                    })
+            # 3. Hit Stop Loss or Take Profit check
+            if stop_loss and ((order_type == "BUY" and curr_price <= stop_loss) or (order_type == "SELL" and curr_price >= stop_loss)):
+                execution_engine.close_trade(ticket, exit_reason="STOP_LOSS_HIT")
+                action_taken = "STOP_LOSS_HIT"
+
+            elif take_profit and ((order_type == "BUY" and curr_price >= take_profit) or (order_type == "SELL" and curr_price <= take_profit)):
+                execution_engine.close_trade(ticket, exit_reason="TAKE_PROFIT_HIT")
+                action_taken = "TAKE_PROFIT_HIT"
+
+            if action_taken:
+                results.append({
+                    "ticket": ticket,
+                    "symbol": symbol,
+                    "action": action_taken,
+                    "current_price": curr_price
+                })
 
         return results
 
@@ -84,13 +104,17 @@ class TradeManager:
         Immediately closes all open trades in the platform.
         """
         outcomes = []
-        with db_manager.get_session() as session:
+        from database.connection import db_manager as current_db
+
+        tickets_to_close = []
+        with current_db.get_session() as session:
             trade_repo = TradeRepository(session)
             open_trades = trade_repo.get_open_trades()
+            tickets_to_close = [t.ticket for t in open_trades]
 
-            for trade in open_trades:
-                ok, msg = execution_engine.close_trade(trade.ticket, exit_reason=reason)
-                outcomes.append((trade.ticket, ok))
+        for ticket in tickets_to_close:
+            ok, msg = execution_engine.close_trade(ticket, exit_reason=reason)
+            outcomes.append((ticket, ok))
 
         logger.warning(f"Emergency Close All triggered. Total closed: {len(outcomes)}. Reason: {reason}")
         return outcomes
