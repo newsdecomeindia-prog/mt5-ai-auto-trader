@@ -19,7 +19,6 @@ from dashboard import dashboard_router
 
 logger = get_logger("general")
 
-# APScheduler instance
 scheduler = AsyncIOScheduler()
 
 
@@ -29,20 +28,16 @@ async def scheduled_trading_cycle():
         return
 
     try:
-        # 1. MT5 Health Check & Connection Maintenance
         health = health_monitor.check_health()
         if health["status"] != "healthy":
             logger.warning("MT5 engine is unhealthy. Skipping trading cycle.")
             return
 
-        # 2. Manage Active Open Positions (Trailing SL, Break-Even, TP/SL hits)
         trade_manager.manage_open_positions()
 
-        # 3. Market Watch Scanning
         active_symbols = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "BTCUSD"]
         mt5_client.sync_market_watch(active_symbols)
 
-        # Retrieve open trades within session
         with db_manager.get_session() as session:
             trade_repo = TradeRepository(session)
             open_trades = list(trade_repo.get_open_trades())
@@ -55,13 +50,11 @@ async def scheduled_trading_cycle():
             if df.empty:
                 continue
 
-            # 4. Generate Signal
             sig = composite_ai_strategy.analyze(sym, df, df_daily=df_daily)
 
             if sig.signal_type in ("BUY", "SELL") and sig.scores.confidence_score >= 60.0:
                 logger.info(f"Generated {sig.signal_type} Signal for {sym} (Confidence: {sig.scores.confidence_score}%)")
 
-                # 5. Risk & Portfolio Validation
                 risk_ok, risk_msg = risk_manager.validate_pre_trade_risk(
                     symbol=sym,
                     signal_type=sig.signal_type,
@@ -81,7 +74,6 @@ async def scheduled_trading_cycle():
                     logger.warning(f"Trade blocked by Portfolio Manager: {port_msg}")
                     continue
 
-                # 6. Execute Order
                 exec_ok, ticket, exec_msg = execution_engine.execute_order(
                     symbol=sym,
                     order_type=sig.signal_type,
@@ -130,13 +122,9 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler initializing DB, MT5 connection, and scheduler."""
     logger.info("Initializing MT5 AI Auto Trading Platform...")
 
-    # Initialize Database
     db_manager.init_db()
-
-    # Connect MT5 Client
     mt5_client.connect()
 
-    # Schedule trading cycles every 10 seconds
     scheduler.add_job(scheduled_trading_cycle, 'interval', seconds=10, id='trading_cycle')
     scheduler.add_job(scheduled_performance_snapshot, 'interval', minutes=5, id='perf_snapshot')
     scheduler.start()
@@ -144,7 +132,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown logic
     logger.info("Shutting down MT5 AI Auto Trading Platform...")
     scheduler.shutdown()
     mt5_client.disconnect()
@@ -157,9 +144,12 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Include routers
+# Include dashboard router
 app.include_router(dashboard_router, prefix="", tags=["Dashboard"])
-app.include_router(api_router, prefix="/api/v1", tags=["API"])
+
+# Include API router at both root "" and "/api/v1" so both /status and /api/v1/status work seamlessly
+app.include_router(api_router, prefix="", tags=["API"])
+app.include_router(api_router, prefix="/api/v1", tags=["API v1"])
 
 
 @app.get("/health")
