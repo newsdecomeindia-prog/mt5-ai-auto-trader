@@ -1,17 +1,18 @@
 import pytest
 from execution import execution_engine, trade_manager
-from database import DatabaseManager, db_manager, TradeRepository, TradeStatus
+from database import DatabaseManager, TradeRepository, TradeStatus
 
 
 @pytest.fixture(autouse=True)
 def setup_test_db(monkeypatch, tmp_path):
-    db_file = tmp_path / "test_mt5.db"
+    db_file = tmp_path / "test_exec.db"
     test_db = DatabaseManager(f"sqlite:///{db_file}")
-    test_db.init_db()
 
     monkeypatch.setattr("database.connection.db_manager", test_db)
     monkeypatch.setattr("database.db_manager", test_db)
-    monkeypatch.setattr("execution.engine.db_manager", test_db)
+    monkeypatch.setattr("config.settings.DATABASE_URL", f"sqlite:///{db_file}")
+
+    test_db.init_db()
     return test_db
 
 
@@ -28,7 +29,6 @@ def test_order_execution_and_close(setup_test_db):
     assert ok is True
     assert ticket is not None
 
-    # Verify order in DB
     with setup_test_db.get_session() as session:
         trade_repo = TradeRepository(session)
         trade = trade_repo.get_by_ticket(ticket)
@@ -36,7 +36,6 @@ def test_order_execution_and_close(setup_test_db):
         assert trade.symbol == "EURUSD"
         assert trade.status == TradeStatus.OPEN.value
 
-    # Close trade
     close_ok, close_msg = execution_engine.close_trade(ticket, exit_reason="TEST_CLOSE")
     assert close_ok is True
 
